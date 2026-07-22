@@ -1,10 +1,6 @@
-10_data
-100_data
-bdd100k_data
-kaggle
-kitty_dataset
-kitty_for_yolo
-testing
-yolo_config_10.yaml
-yolo_config_100.yaml
-yolo_config_kitty.yaml
+bd100
+chekpoints
+kitty
+left_img_folder
+right_img_folder
+
