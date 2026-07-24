@@ -44,14 +44,12 @@ class Inference:
 
         return frame, boxes_and_classes
 
-    # POPRAWKA 1: Usunięto 'self'
     @staticmethod
     def plot(img: np.ndarray) -> None:
         plt.imshow(img)
         plt.axis("off")
         plt.show()
 
-    # POPRAWKA 2: Usunięto 'self'
     @staticmethod
     def imread_rgb(path: str) -> np.ndarray:
         img = cv2.imread(path)
