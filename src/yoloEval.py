@@ -57,7 +57,7 @@ class Inference:
             raise ValueError(f"Nie udało się wczytać obrazu: {path}")
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    def plot_bounding_box(self, image_path: str):
+    def plot_bounding_box(self, image_path: str) -> np.array:
         frame, boxes_and_classes = self.pipeline(image_path)
 
         for bac in boxes_and_classes:
@@ -74,4 +74,4 @@ class Inference:
                 2,
             )
 
-        self.plot(frame)
+        return frame
