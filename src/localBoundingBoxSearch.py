@@ -10,7 +10,7 @@ class BBSearcher:
         threshold: float = 300.0,
         max_y_diff: float = 50.0,
         max_size_ratio: float = 2.0,
-        corr_weight: float = 200.0,  # Waga błędu z filtra korelacyjnego
+        corr_weight: float = 400.0,  
     ):
         self.threshold = threshold
         self.max_y_diff = max_y_diff
@@ -50,20 +50,16 @@ class BBSearcher:
         return (rx <= lmx <= rx + rw) and (ry <= lmy <= ry + rh)
 
     def __pre_process(self, img: np.ndarray) -> np.ndarray:
-        """Log-transformacja, normalizacja oraz okno Hanninga (2D) - przeniesione z Twojego skryptu MOSSE."""
         height, width = img.shape
         img = img.astype(np.float32)
 
-        # 1. Logarytmizacja
         img = np.log(img + 1.0)
 
-        # 2. Normalizacja średniej i odchylenia standardowego
         mean = np.mean(img)
         std = np.std(img)
         if std != 0:
             img = (img - mean) / std
 
-        # 3. Maska Hanninga 2D
         win_col = np.hanning(width)
         win_row = np.hanning(height)
         mask_col, mask_row = np.meshgrid(win_col, win_row)
@@ -78,11 +74,6 @@ class BBSearcher:
         img_left: np.ndarray,
         img_right: np.ndarray,
     ) -> float:
-        """Liczbowa wartość błędu korelacyjnego [0.0 - 1.0].
-
-        Zwraca 0.0 dla idealnej korelacji, 1.0 dla całkowitego braku podobieństwa.
-        """
-        # Bezpieczne wycinanie wycinków ROI (z przycięciem do granic obrazu)
         h_l, w_l = img_left.shape[:2]
         h_r, w_r = img_right.shape[:2]
 
@@ -97,37 +88,30 @@ class BBSearcher:
         ]
 
         if crop_l.size == 0 or crop_r.size == 0:
-            return 1.0  # Brak możliwości korelacji -> maksymalny błąd
+            return 1.0  
 
-        # Konwersja do odcieni szarości
         if len(crop_l.shape) == 3:
             crop_l = cv2.cvtColor(crop_l, cv2.COLOR_BGR2GRAY)
         if len(crop_r.shape) == 3:
             crop_r = cv2.cvtColor(crop_r, cv2.COLOR_BGR2GRAY)
 
-        # Sprowadzenie obu do jednakowego wymiaru (np. 64x64)
         target_size = (64, 64)
         crop_l = cv2.resize(crop_l, target_size)
         crop_r = cv2.resize(crop_r, target_size)
 
-        # Preprocessing widmowy (Hanning + normalizacja)
         fi_l = self.__pre_process(crop_l)
         fi_r = self.__pre_process(crop_r)
 
-        # 2D FFT dla obu ramek
         F_l = np.fft.fft2(fi_l)
         F_r = np.fft.fft2(fi_r)
 
-        # Wzajemna korelacja fazowa w dziedzinie częstotliwości
         num = F_l * np.conj(F_r)
         den = np.abs(num) + 1e-5
         response_complex = np.fft.ifft2(num / den)
         response = np.abs(response_complex)
 
-        # Maksymalny pik odpowiedzi
         max_response = np.max(response)
 
-        # Przekształcamy odpowiedź korelacji (0..1) na koszt błędu (im mniejsza odpowiedź, tym większy błąd)
         corr_error = 1.0 - max_response
         return max(0.0, float(corr_error))
 
@@ -141,25 +125,20 @@ class BBSearcher:
         cxl, cyl = self.__get_bottom_center(leftBB)
         cxr, cyr = self.__get_bottom_center(rightBB)
 
-        # 1. Błąd Y
         e_y = abs(cyl - cyr)
 
-        # 2. Błąd skali
         _, _, lw, lh = leftBB.coord
         _, _, rw, rh = rightBB.coord
         area_l = lw * lh
         area_r = rw * rh
         e_size = abs(area_l - area_r) / max(area_l, area_r)
 
-        # 3. Dysparycja X
         disparity = cxl - cxr
 
-        # 4. SKŁADOWA FILTRA KORELACYJNEGO (FFT + MOSSE)
         e_corr = self.__calculateCorrelationError(
             leftBB, rightBB, img_left, img_right
         )
 
-        # Całkowity błąd uwzględniający cechy geometryczne + wyjście filtra korelacyjnego
         return (
             (e_y * 5.0)
             + (e_size * 100.0)
@@ -184,7 +163,6 @@ class BBSearcher:
                 if not self.__isInBox(leftBB, rightBB):
                     continue
 
-                # Przekazujemy oba obrazy do wyliczenia korelacji
                 current_error = self.__calculateMatchingError(
                     leftBB, rightBB, img_left, img_right
                 )
