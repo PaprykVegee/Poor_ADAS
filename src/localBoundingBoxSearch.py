@@ -4,13 +4,12 @@ from src.yoloEval import BoxDesc
 
 
 class BBSearcher:
-
     def __init__(
         self,
-        threshold: float = 300.0,
+        threshold: float = 500.0,
         max_y_diff: float = 50.0,
         max_size_ratio: float = 2.0,
-        corr_weight: float = 400.0,  
+        corr_weight: float = 300.0,  
     ):
         self.threshold = threshold
         self.max_y_diff = max_y_diff
