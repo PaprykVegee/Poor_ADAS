@@ -3,102 +3,109 @@ import numpy as np
 from src.yoloEval import BoxDesc
 
 
-class PointMatcher:
+class ChPtrDesc:
+    def __init__(
+        self,
+        coordL: list[int | float] = None,
+        coordR: list[int | float] = None,
+        cls: str = None,
+        pointsL: np.ndarray = None,
+        pointsR: np.ndarray = None,
+        triangulation_value: float = None,
+    ):
+        self.coordL = coordL
+        self.coordR = coordR
+        self.cls = cls
+        self.pointsL = pointsL
+        self.pointsR = pointsR
+        self.triangulation_value = triangulation_value
 
-    def __init__(self, ratio_thresh: float = 1):
+
+class PointMatcher:
+    def __init__(self, ratio_thresh: float = 0.8, ransac_thresh: float = 1.0):
         self.orb = cv2.ORB_create(nfeatures=1000, fastThreshold=1, scoreType=cv2.ORB_FAST_SCORE)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         self.ratio_thresh = ratio_thresh
+        self.ransac_thresh = ransac_thresh  # Próg RANSAC (tolerancja błędu w pikselach)
 
     def __findPoint(
-            self,
-            pairL: BoxDesc,
-            pairR: BoxDesc,
-            frameL: np.ndarray,
-            frameR: np.ndarray,
-            pair_color: tuple[int, int, int],
-        ):
-            lx, ly, lw, lh = map(int, pairL.coord)
-            rx, ry, rw, rh = map(int, pairR.coord)
+        self, pairL: BoxDesc, pairR: BoxDesc, frameL: np.ndarray, frameR: np.ndarray, pair_color: tuple
+    ):
+        lx, ly, lw, lh = map(int, pairL.coord)
+        rx, ry, rw, rh = map(int, pairR.coord)
 
-            roiL = frameL[ly : ly + lh, lx : lx + lw]
-            roiR = frameR[ry : ry + rh, rx : rx + rw]
+        roiL = frameL[ly : ly + lh, lx : lx + lw]
+        roiR = frameR[ry : ry + rh, rx : rx + rw]
 
-            cv2.rectangle(frameL, (lx, ly), (lx + lw, ly + lh), pair_color, 2)
-            cv2.rectangle(frameR, (rx, ry), (rx + rw, ry + rh), pair_color, 2)
+        cv2.rectangle(frameL, (lx, ly), (lx + lw, ly + lh), pair_color, 2)
+        cv2.rectangle(frameR, (rx, ry), (rx + rw, ry + rh), pair_color, 2)
 
-            if roiL.size == 0 or roiR.size == 0:
-                return np.empty((0, 2)), np.empty((0, 2))
+        if roiL.size == 0 or roiR.size == 0:
+            return np.empty((0, 2)), np.empty((0, 2))
 
-            if len(roiL.shape) == 3:
-                roiL_gray = cv2.cvtColor(roiL, cv2.COLOR_RGB2GRAY)
-                roiR_gray = cv2.cvtColor(roiR, cv2.COLOR_RGB2GRAY)
+        roiL_gray = cv2.cvtColor(roiL, cv2.COLOR_RGB2GRAY) if len(roiL.shape) == 3 else roiL
+        roiR_gray = cv2.cvtColor(roiR, cv2.COLOR_RGB2GRAY) if len(roiR.shape) == 3 else roiR
+
+        scale_L = 80.0 / min(roiL_gray.shape[:2]) if min(roiL_gray.shape[:2]) < 80 else 1.0
+        scale_R = 80.0 / min(roiR_gray.shape[:2]) if min(roiR_gray.shape[:2]) < 80 else 1.0
+
+        if scale_L != 1.0:
+            roiL_gray = cv2.resize(roiL_gray, (0, 0), fx=scale_L, fy=scale_L, interpolation=cv2.INTER_CUBIC)
+        if scale_R != 1.0:
+            roiR_gray = cv2.resize(roiR_gray, (0, 0), fx=scale_R, fy=scale_R, interpolation=cv2.INTER_CUBIC)
+
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        roiL_gray = cv2.filter2D(roiL_gray, -1, kernel)
+        roiR_gray = cv2.filter2D(roiR_gray, -1, kernel)
+
+        kpL, desL = self.orb.detectAndCompute(roiL_gray, None)
+        kpR, desR = self.orb.detectAndCompute(roiR_gray, None)
+
+        if desL is None or desR is None or len(desL) == 0 or len(desR) == 0:
+            return np.empty((0, 2)), np.empty((0, 2))
+
+        matches = self.bf.knnMatch(desL, desR, k=2)
+
+        raw_ptsL, raw_ptsR = [], []
+        for match in matches:
+            if len(match) == 2:
+                m, n = match
+                if m.distance >= self.ratio_thresh * n.distance:
+                    continue
+            elif len(match) == 1:
+                m = match[0]
             else:
-                roiL_gray, roiR_gray = roiL, roiR
+                continue
 
-            min_dim_L = min(roiL_gray.shape[:2])
-            min_dim_R = min(roiR_gray.shape[:2])
+            pt_l = kpL[m.queryIdx].pt
+            pt_r = kpR[m.trainIdx].pt
 
-            scale_L = 1.0
-            scale_R = 1.0
+            global_x_l = int((pt_l[0] / scale_L) + lx)
+            global_y_l = int((pt_l[1] / scale_L) + ly)
+            global_x_r = int((pt_r[0] / scale_R) + rx)
+            global_y_r = int((pt_r[1] / scale_R) + ry)
 
-            if min_dim_L < 80:
-                scale_L = 80.0 / min_dim_L
-                roiL_gray = cv2.resize(roiL_gray, (0, 0), fx=scale_L, fy=scale_L, interpolation=cv2.INTER_CUBIC)
+            raw_ptsL.append([global_x_l, global_y_l])
+            raw_ptsR.append([global_x_r, global_y_r])
 
-            if min_dim_R < 80:
-                scale_R = 80.0 / min_dim_R
-                roiR_gray = cv2.resize(roiR_gray, (0, 0), fx=scale_R, fy=scale_R, interpolation=cv2.INTER_CUBIC)
+        ptsL_arr = np.array(raw_ptsL, dtype=np.float32)
+        ptsR_arr = np.array(raw_ptsR, dtype=np.float32)
 
-            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-            roiL_gray = cv2.filter2D(roiL_gray, -1, kernel)
-            roiR_gray = cv2.filter2D(roiR_gray, -1, kernel)
+        if len(ptsL_arr) >= 8:
+            _, mask = cv2.findFundamentalMat(
+                ptsL_arr, ptsR_arr, cv2.FM_RANSAC, self.ransac_thresh, 0.99
+            )
+            
+            if mask is not None:
+                inliers_mask = mask.ravel() == 1
+                ptsL_arr = ptsL_arr[inliers_mask]
+                ptsR_arr = ptsR_arr[inliers_mask]
 
-            kpL, desL = self.orb.detectAndCompute(roiL_gray, None)
-            kpR, desR = self.orb.detectAndCompute(roiR_gray, None)
+        for pL, pR in zip(ptsL_arr, ptsR_arr):
+            cv2.circle(frameL, (int(pL[0]), int(pL[1])), 2, pair_color, -1)
+            cv2.circle(frameR, (int(pR[0]), int(pR[1])), 2, pair_color, -1)
 
-            if desL is None or desR is None or len(desL) == 0 or len(desR) == 0:
-                return np.empty((0, 2)), np.empty((0, 2))
-
-            matches = self.bf.knnMatch(desL, desR, k=2)
-
-            ptsL = []
-            ptsR = []
-
-            for match in matches:
-                if len(match) < 2:
-                    if len(match) == 1:
-                        m = match[0]
-                        pt_l = kpL[m.queryIdx].pt
-                        pt_r = kpR[m.trainIdx].pt
-                    else:
-                        continue
-                else:
-                    m, n = match
-                    if m.distance >= self.ratio_thresh * n.distance:
-                        continue
-                    pt_l = kpL[m.queryIdx].pt
-                    pt_r = kpR[m.trainIdx].pt
-
-                orig_pt_l_x = pt_l[0] / scale_L
-                orig_pt_l_y = pt_l[1] / scale_L
-
-                orig_pt_r_x = pt_r[0] / scale_R
-                orig_pt_r_y = pt_r[1] / scale_R
-
-                global_x_l = int(orig_pt_l_x + lx)
-                global_y_l = int(orig_pt_l_y + ly)
-
-                global_x_r = int(orig_pt_r_x + rx)
-                global_y_r = int(orig_pt_r_y + ry)
-
-                ptsL.append([global_x_l, global_y_l])
-                ptsR.append([global_x_r, global_y_r])
-
-                cv2.circle(frameL, (global_x_l, global_y_l), 2, pair_color, -1)
-                cv2.circle(frameR, (global_x_r, global_y_r), 2, pair_color, -1)
-
-            return np.array(ptsL, dtype=np.float32), np.array(ptsR, dtype=np.float32)
+        return ptsL_arr, ptsR_arr
 
     def findPoints(
         self,
@@ -106,38 +113,34 @@ class PointMatcher:
         frameL: np.ndarray,
         frameR: np.ndarray,
         draw_lines: bool = True,
-    ):
+    ) -> tuple[np.ndarray, list[ChPtrDesc]]:
         debug_L = frameL.copy()
         debug_R = frameR.copy()
-
-        all_ptsL = []
-        all_ptsR = []
-        pair_colors = [] 
+        descriptors: list[ChPtrDesc] = []
 
         for pairL, pairR in bb_pairs:
-            pair_color = tuple(
-                map(int, np.random.randint(50, 255, size=3))
-            )
+            pair_color = tuple(map(int, np.random.randint(50, 255, size=3)))
+            ptsL, ptsR = self.__findPoint(pairL, pairR, debug_L, debug_R, pair_color)
 
-            ptsL, ptsR = self.__findPoint(
-                pairL, pairR, debug_L, debug_R, pair_color
+            desc = ChPtrDesc(
+                coordL=pairL.coord,
+                coordR=pairR.coord,
+                cls=pairL.cls,
+                pointsL=ptsL,
+                pointsR=ptsR,
+                triangulation_value=None,
             )
-
-            if len(ptsL) > 0:
-                all_ptsL.append(ptsL)
-                all_ptsR.append(ptsR)
-                pair_colors.append(pair_color)
+            descriptors.append(desc)
 
         vis_frame = np.hstack((debug_L, debug_R))
 
-        if draw_lines and len(all_ptsL) > 0:
+        if draw_lines:
             width_offset = frameL.shape[1]
+            for desc in descriptors:
+                if len(desc.pointsL) > 0:
+                    for pL, pR in zip(desc.pointsL, desc.pointsR):
+                        pt_l = (int(pL[0]), int(pL[1]))
+                        pt_r = (int(pR[0]) + width_offset, int(pR[1]))
+                        cv2.line(vis_frame, pt_l, pt_r, (0, 255, 0), 1, cv2.LINE_AA)
 
-            for ptsL, ptsR, color in zip(all_ptsL, all_ptsR, pair_colors):
-                for pL, pR in zip(ptsL, ptsR):
-                    pt_l = (int(pL[0]), int(pL[1]))
-                    pt_r = (int(pR[0]) + width_offset, int(pR[1]))
-
-                    cv2.line(vis_frame, pt_l, pt_r, color, 1, cv2.LINE_AA)
-
-        return vis_frame, (all_ptsL, all_ptsR)
+        return vis_frame, descriptors
