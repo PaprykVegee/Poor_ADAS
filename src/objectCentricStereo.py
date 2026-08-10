@@ -4,6 +4,7 @@ from src.characteristicPointMatcher import PointMatcher, ChPtrDesc
 from src.localBoundingBoxSearch import BBSearcher
 from src.triangulationCharacteristicsPoint import TriangulationPkt
 from src.yoloEval import Inference
+from src.BBMatcher import BBLeftRightMatcher
 
 
 class ObjectCentricStereo:
@@ -17,7 +18,7 @@ class ObjectCentricStereo:
         baseline: float = 0.5,
     ) -> None:
         self.inference = Inference(model_path)
-        self.bbSearcher = BBSearcher(threshold=threshold, max_y_diff=max_y_diff, corr_weight=corr_weight)
+        self.bbSearcher = BBLeftRightMatcher(threshold=threshold, corr_weight=corr_weight)
         self.ptrMatcher = PointMatcher(ratio_thresh=lowa_ratio)
         self.tranPkt = TriangulationPkt(baseline=baseline)
 
