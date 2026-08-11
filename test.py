@@ -1,196 +1,38 @@
+
 import os
 import cv2
-import numpy as np
-
 import time
 
-from src.yoloEval import Inference
-from src.BBMatcher import (
-    BBLeftRightMatcher,
-    FrameMatcher,
-)
-from src.characteristicPointMatcher import PointMatcher
-from src.triangulationCharacteristicsPoint import TriangulationPkt
-
-
-def draw_tracking_info(
-    image: np.ndarray,
-    tracks: list,
-) -> np.ndarray:
-
-    output = image.copy()
-
-    for track_id, left_bb, right_bb in tracks:
-
-        x, y, w, h = map(
-            int,
-            left_bb.coord,
-        )
-
-        cv2.rectangle(
-            output,
-            (x, y),
-            (x + w, y + h),
-            (0, 255, 0),
-            2,
-        )
-
-        label = f"ID: {track_id}"
-
-        (text_w, text_h), _ = cv2.getTextSize(
-            label,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            2,
-        )
-
-        text_x = x + 5
-        text_y = y + text_h + 5
-
-        cv2.rectangle(
-            output,
-            (
-                text_x - 2,
-                text_y - text_h - 4,
-            ),
-            (
-                text_x + text_w + 2,
-                text_y + 4,
-            ),
-            (0, 0, 0),
-            -1,
-        )
-
-        cv2.putText(
-            output,
-            label,
-            (text_x, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-    return output
-
-
-def draw_distance(
-    image: np.ndarray,
-    descriptors,
-) -> np.ndarray:
-
-    output = image.copy()
-
-    for desc in descriptors:
-
-        if desc.coordL is None:
-            continue
-
-        lx, ly, lw, lh = map(
-            int,
-            desc.coordL,
-        )
-
-        z_val = desc.triangulation_value
-
-        if z_val is not None:
-            label = (
-                f"{desc.cls}: "
-                f"{z_val:.2f} m"
-            )
-        else:
-            label = (
-                f"{desc.cls}: N/A"
-            )
-
-        cv2.rectangle(
-            output,
-            (
-                lx,
-                ly,
-            ),
-            (
-                lx + lw,
-                ly + lh,
-            ),
-            (0, 255, 0),
-            2,
-        )
-
-        (
-            text_w,
-            text_h,
-        ), _ = cv2.getTextSize(
-            label,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            2,
-        )
-
-        text_x = lx + 5
-        text_y = ly + text_h + 8
-
-        if text_y > ly + lh:
-            text_y = ly + lh - 5
-
-        cv2.rectangle(
-            output,
-            (
-                text_x - 2,
-                text_y - text_h - 4,
-            ),
-            (
-                text_x + text_w + 2,
-                text_y + 4,
-            ),
-            (0, 0, 0),
-            -1,
-        )
-
-        cv2.putText(
-            output,
-            label,
-            (
-                text_x,
-                text_y,
-            ),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
-    return output
+from src.objectCentricStereo import ObjectCentricStereo
 
 
 def main():
 
-    inference = Inference(
-        "models_weights/yolo11n.pt"
-    )
+    # ==================================================
+    # OBJECT CENTRIC STEREO
+    # ==================================================
 
+    stereo = ObjectCentricStereo(
+        model_path="models_weights/yolo11n.pt",
 
-    stereo_matcher = BBLeftRightMatcher(
-        threshold=1000.0,
-        local_search_x=1.0,
-        local_search_y=0.5,
+        # Stereo
+        threshold=500.0,
         corr_weight=300.0,
+        lowa_ratio=0.9,
+        baseline=0.5,
+
+        # Tracking
+        max_age=5,
+
+        # Kalman
+        kalman_dt=1.0,
+        kalman_process_noise=0.01,
+        kalman_measurement_noise=1.0,
     )
 
-    frame_matcher = FrameMatcher(
-        threshold=300.0,
-        local_search_x=3.0,
-        local_search_y=2.0,
-        position_weight=1.0,
-        size_weight=100.0,
-    )
-
-    point_matcher = PointMatcher()
-
-    triangulation = TriangulationPkt()
-
+    # ==================================================
+    # IMAGE EXTENSIONS
+    # ==================================================
 
     valid_extensions = (
         ".jpg",
@@ -199,6 +41,10 @@ def main():
         ".webp",
         ".bmp",
     )
+
+    # ==================================================
+    # LEFT IMAGES
+    # ==================================================
 
     left_images = sorted(
         [
@@ -214,7 +60,11 @@ def main():
                 valid_extensions
             )
         ]
-    )[900:1100]
+    )
+
+    # ==================================================
+    # RIGHT IMAGES
+    # ==================================================
 
     right_images = sorted(
         [
@@ -230,232 +80,233 @@ def main():
                 valid_extensions
             )
         ]
-    )[900:1100]
+    )
 
-    previous_left_bbs = []
-    previous_tracks = []
+    # ==================================================
+    # CHECK
+    # ==================================================
 
+    if len(left_images) == 0:
 
-    for frame_idx, (i_l, i_r) in enumerate(
-        zip(
-            left_images,
-            right_images,
-        ),
-        start=900,
+        print(
+            "ERROR: No left images found."
+        )
+
+        return
+
+    if len(right_images) == 0:
+
+        print(
+            "ERROR: No right images found."
+        )
+
+        return
+
+    if len(left_images) != len(right_images):
+
+        print(
+            "WARNING:"
+        )
+
+        print(
+            f"Left images : {len(left_images)}"
+        )
+
+        print(
+            f"Right images: {len(right_images)}"
+        )
+
+        print(
+            "Using only the common number of frames."
+        )
+
+    number_of_frames = min(
+        len(left_images),
+        len(right_images),
+    )
+
+    print(
+        f"Frames: {number_of_frames}"
+    )
+
+    # ==================================================
+    # TRACKING STATE
+    # ==================================================
+
+    previous_boxes_l = None
+
+    # ==================================================
+    # MAIN LOOP
+    # ==================================================
+
+    for frame_idx in range(
+        number_of_frames
     ):
 
-
-        frame_left, left_bbs = inference.pipeline(
-            i_l,
-            conf=0.2,
-            iou=0.4,
-        )
-
-        frame_right, right_bbs = inference.pipeline(
-            i_r,
-            conf=0.2,
-            iou=0.4,
-        )
-
-        stereo_pairs = stereo_matcher.pipeline(
-            left_bbs,
-            right_bbs,
-            frame_left,
-            frame_right,
-        )
-
-        current_left_bbs = [
-            left_bb
-            for left_bb, right_bb
-            in stereo_pairs
+        left_path = left_images[
+            frame_idx
         ]
 
-        if len(previous_left_bbs) == 0:
+        right_path = right_images[
+            frame_idx
+        ]
 
-            temporal_tracks = []
+        print(
+            "\n"
+            + "=" * 60
+        )
 
-            for left_bb, right_bb in stereo_pairs:
+        print(
+            f"FRAME {frame_idx}"
+        )
 
-                track_id = (
-                    frame_matcher._create_track(
-                        left_bb
-                    )
-                )
+        print(
+            f"LEFT : {left_path}"
+        )
 
-                temporal_tracks.append(
-                    (
-                        track_id,
-                        left_bb,
-                        right_bb,
-                    )
-                )
+        print(
+            f"RIGHT: {right_path}"
+        )
 
-        else:
+        print(
+            "=" * 60
+        )
 
-            temporal_matches = (
-                frame_matcher.pipeline(
-                    previous_left_bbs,
-                    current_left_bbs,
-                )
+        # ==================================================
+        # PIPELINE
+        # ==================================================
+
+        try:
+
+            (
+                distance_image,
+                id_image,
+                objects,
+            ) = stereo.pipeline(
+                left_path,
+                right_path,
+                previous_boxes_l,
             )
 
-            temporal_tracks = []
+        except Exception as e:
 
-            for (
-                track_id,
-                previous_bb,
-                current_bb,
-            ) in temporal_matches:
+            print(
+                f"Pipeline error: {e}"
+            )
 
-                for (
-                    left_bb,
-                    right_bb,
-                ) in stereo_pairs:
+            import traceback
 
-                    if left_bb is current_bb:
+            traceback.print_exc()
 
-                        temporal_tracks.append(
-                            (
-                                track_id,
-                                left_bb,
-                                right_bb,
-                            )
-                        )
+            continue
 
-                        break
+        # ==================================================
+        # PRINT OBJECT DATA
+        # ==================================================
 
-
-        descriptors = []
+        print(
+            f"\nDetected objects: "
+            f"{len(objects)}"
+        )
 
         for (
             track_id,
-            left_bb,
-            right_bb,
-        ) in temporal_tracks:
+            obj,
+        ) in objects.items():
 
-            pairs = [
-                (
-                    left_bb,
-                    right_bb,
-                )
-            ]
+            bbox = obj["bbox"]
 
-            try:
+            distance = obj["distance"]
 
-                _, descs = (
-                    point_matcher.findPoints(
-                        pairs,
-                        frame_left,
-                        frame_right,
-                    )
-                )
+            print(
+                f"\nID: {track_id}"
+            )
 
-            except Exception as e:
+            print(
+                f"Class: {obj['class']}"
+            )
+
+            print(
+                "BBox:"
+                f" x={bbox['x']}"
+                f" y={bbox['y']}"
+                f" w={bbox['w']}"
+                f" h={bbox['h']}"
+            )
+
+            if distance is None:
 
                 print(
-                    f"[Frame {frame_idx}] "
-                    f"Point matching error: {e}"
+                    "Distance: N/A"
                 )
 
-                continue
+            else:
 
-            if descs is None:
-                continue
-
-            for desc in descs:
-
-                desc = (
-                    triangulation.process_descriptor(
-                        desc
-                    )
+                print(
+                    f"Distance: "
+                    f"{distance:.3f} m"
                 )
 
-                # Zachowujemy ID obiektu.
-                desc.track_id = track_id
-
-                descriptors.append(
-                    desc
-                )
-
-        left_visualization = (
-            draw_tracking_info(
-                frame_left,
-                temporal_tracks,
-            )
-        )
-
-        distance_visualization = (
-            draw_distance(
-                left_visualization,
-                descriptors,
-            )
-        )
-
-
-        stereo_visualization = (
-            frame_left.copy()
-        )
-
-        for (
-            track_id,
-            left_bb,
-            right_bb,
-        ) in temporal_tracks:
-
-            x, y, w, h = map(
-                int,
-                left_bb.coord,
-            )
-
-            cv2.rectangle(
-                stereo_visualization,
-                (
-                    x,
-                    y,
-                ),
-                (
-                    x + w,
-                    y + h,
-                ),
-                (255, 0, 0),
-                2,
-            )
-
-            cv2.putText(
-                stereo_visualization,
-                f"ID {track_id}",
-                (
-                    x,
-                    max(20, y - 5),
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
+        # ==================================================
+        # DISPLAY
+        # ==================================================
 
         cv2.imshow(
-            "Tracking + Distance",
-            distance_visualization[:, :, ::-1]
+            "Object Centric Stereo - Distance",
+            distance_image[:, :, ::-1],
         )
 
         cv2.imshow(
-            "Stereo / Track IDs",
-            stereo_visualization[:, :, ::-1]
+            "Object Centric Stereo - IDs",
+            id_image[:, :, ::-1],
         )
 
-        key = cv2.waitKey(10) & 0xFF
-        time.sleep(0.4)
+        # ==================================================
+        # NEXT FRAME
+        #
+        # YOLO boxes from the current frame
+        # are needed by FrameMatcher.
+        #
+        # We can obtain them directly from
+        # the objects returned by pipeline.
+        # ==================================================
+
+        previous_boxes_l = []
+
+        for obj in objects.values():
+
+            bbox = obj["bbox"]
+
+            previous_boxes_l.append(
+                {
+                    "x": bbox["x"],
+                    "y": bbox["y"],
+                    "w": bbox["w"],
+                    "h": bbox["h"],
+                }
+            )
+
+        # ==================================================
+        # WAIT
+        # ==================================================
+
+        key = cv2.waitKey(1) & 0xFF
+        time.sleep(0.2)
 
         if key == ord("q"):
+
+            print(
+                "Exiting..."
+            )
+
             break
 
+        # Opcjonalnie:
+        # time.sleep(0.4)
 
-        previous_left_bbs = (
-            current_left_bbs.copy()
-        )
+    # ==================================================
+    # CLEANUP
+    # ==================================================
 
     cv2.destroyAllWindows()
 
