@@ -290,16 +290,16 @@ def main():
         # WAIT
         # ==================================================
 
-        key = cv2.waitKey(1) & 0xFF
-        time.sleep(0.2)
+        cv2.waitKey(0)
+        #time.sleep(0.2)
 
-        if key == ord("q"):
+        # if key == ord("q"):
 
-            print(
-                "Exiting..."
-            )
+        #     print(
+        #         "Exiting..."
+        #     )
 
-            break
+        #     break
 
         # Opcjonalnie:
         # time.sleep(0.4)

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from src.yoloEval import BoxDesc
 
@@ -410,16 +411,16 @@ class BBLeftRightMatcher(BBMatcher):
 
 class FrameMatcher(BBMatcher):
     """
-    Matcher pomiędzy kolejnymi klatkami.
+    Tracker obiektów pomiędzy kolejnymi klatkami.
 
-    frame t <-> frame t+1
+    Matching:
+        1. Kalman/predykcja pozycji -> na razie poprzedni bbox
+        2. Gating
+        3. Cost = position + IoU + size
+        4. Hungarian algorithm
+        5. Aktualizacja tracków
 
-    Utrzymuje track_id dla obiektów i pamięta tracki,
-    które chwilowo nie zostały wykryte przez YOLO.
-
-    max_age:
-        Maksymalna liczba kolejnych klatek, przez które
-        track może nie mieć detekcji, zanim zostanie usunięty.
+    Track ID jest stabilne.
     """
 
     def __init__(
@@ -429,7 +430,10 @@ class FrameMatcher(BBMatcher):
         local_search_y: float = 2.0,
         position_weight: float = 1.0,
         size_weight: float = 100.0,
+        iou_weight: float = 100.0,
         max_age: int = 5,
+        max_distance: float = 250.0,
+        min_iou: float = 0.01,
     ) -> None:
 
         super().__init__(
@@ -440,14 +444,106 @@ class FrameMatcher(BBMatcher):
 
         self.position_weight = position_weight
         self.size_weight = size_weight
+        self.iou_weight = iou_weight
 
         self.max_age = max_age
+        self.max_distance = max_distance
+        self.min_iou = min_iou
 
         self.tracks: dict[int, dict] = {}
 
         self.next_track_id = 0
 
-    def _calculate_frame_matching_error(
+
+    @staticmethod
+    def _bbox_xyxy(bb: BoxDesc):
+
+        x, y, w, h = bb.coord
+
+        return (
+            float(x),
+            float(y),
+            float(x + w),
+            float(y + h),
+        )
+
+    @staticmethod
+    def _bbox_center(bb: BoxDesc):
+
+        x, y, w, h = bb.coord
+
+        return (
+            float(x + w / 2.0),
+            float(y + h / 2.0),
+        )
+
+    def _calculate_iou(
+        self,
+        bb0: BoxDesc,
+        bb1: BoxDesc,
+    ) -> float:
+
+        x0_1, y0_1, x0_2, y0_2 = (
+            self._bbox_xyxy(bb0)
+        )
+
+        x1_1, y1_1, x1_2, y1_2 = (
+            self._bbox_xyxy(bb1)
+        )
+
+        intersection_x1 = max(
+            x0_1,
+            x1_1,
+        )
+
+        intersection_y1 = max(
+            y0_1,
+            y1_1,
+        )
+
+        intersection_x2 = min(
+            x0_2,
+            x1_2,
+        )
+
+        intersection_y2 = min(
+            y0_2,
+            y1_2,
+        )
+
+        intersection_w = max(
+            0.0,
+            intersection_x2 - intersection_x1,
+        )
+
+        intersection_h = max(
+            0.0,
+            intersection_y2 - intersection_y1,
+        )
+
+        intersection = (
+            intersection_w *
+            intersection_h
+        )
+
+        area0 = (
+            max(0.0, x0_2 - x0_1) *
+            max(0.0, y0_2 - y0_1)
+        )
+
+        area1 = (
+            max(0.0, x1_2 - x1_1) *
+            max(0.0, y1_2 - y1_1)
+        )
+
+        union = area0 + area1 - intersection
+
+        if union <= 0.0:
+            return 0.0
+
+        return intersection / union
+
+    def _calculate_cost(
         self,
         previous_bb: BoxDesc,
         current_bb: BoxDesc,
@@ -456,25 +552,55 @@ class FrameMatcher(BBMatcher):
         if previous_bb.cls != current_bb.cls:
             return float("inf")
 
-        position_error = (
-            self._calculate_position_error(
-                previous_bb,
-                current_bb,
+        px, py = self._bbox_center(
+            previous_bb
+        )
+
+        cx, cy = self._bbox_center(
+            current_bb
+        )
+
+        position_error = float(
+            np.hypot(
+                px - cx,
+                py - cy,
             )
         )
 
-        size_error = (
-            self._calculate_size_error(
-                previous_bb,
-                current_bb,
-            )
+        if position_error > self.max_distance:
+            return float("inf")
+
+
+        iou = self._calculate_iou(
+            previous_bb,
+            current_bb,
         )
 
-        return (
-            position_error * self.position_weight
+        if (
+            position_error > self.max_distance * 0.5
+            and iou < self.min_iou
+        ):
+            return float("inf")
+
+
+        size_error = self._calculate_size_error(
+            previous_bb,
+            current_bb,
+        )
+
+
+        cost = (
+            position_error *
+            self.position_weight
             +
-            size_error * self.size_weight
+            size_error *
+            self.size_weight
+            +
+            (1.0 - iou) *
+            self.iou_weight
         )
+
+        return float(cost)
 
     def _create_track(
         self,
@@ -482,29 +608,38 @@ class FrameMatcher(BBMatcher):
     ) -> int:
 
         track_id = self.next_track_id
+
         self.next_track_id += 1
 
         self.tracks[track_id] = {
+
             "bbox": bb,
+
             "misses": 0,
+
+            "hits": 1,
+
+            "age": 1,
         }
 
         return track_id
 
-    def _remove_old_tracks(self) -> None:
-        """
-        Usuwa tracki, które były niewykryte przez max_age klatek.
-        """
+    def _remove_old_tracks(self):
 
         tracks_to_remove = []
 
         for track_id, track in self.tracks.items():
 
             if track["misses"] > self.max_age:
-                tracks_to_remove.append(track_id)
+
+                tracks_to_remove.append(
+                    track_id
+                )
 
         for track_id in tracks_to_remove:
+
             del self.tracks[track_id]
+
 
     def pipeline(
         self,
@@ -516,7 +651,26 @@ class FrameMatcher(BBMatcher):
         tuple[int, BoxDesc | None, BoxDesc | None]
     ]:
 
-        matches = []
+        results = []
+
+        if len(current_bbs) == 0:
+
+            for track_id, track in self.tracks.items():
+
+                track["misses"] += 1
+                track["age"] += 1
+
+                results.append(
+                    (
+                        track_id,
+                        track["bbox"],
+                        None,
+                    )
+                )
+
+            self._remove_old_tracks()
+
+            return results
 
         if len(self.tracks) == 0:
 
@@ -526,7 +680,7 @@ class FrameMatcher(BBMatcher):
                     current_bb
                 )
 
-                matches.append(
+                results.append(
                     (
                         track_id,
                         None,
@@ -534,103 +688,121 @@ class FrameMatcher(BBMatcher):
                     )
                 )
 
-            return matches
+            return results
 
         active_tracks = list(
             self.tracks.items()
         )
 
-        used_tracks = set()
-
-        for current_bb in current_bbs:
-
-            best_error = float("inf")
-            best_track_id = None
-
-            for track_id, track in active_tracks:
-
-                if track_id in used_tracks:
-                    continue
-
-                previous_bb = track["bbox"]
-
-                if previous_bb.cls != current_bb.cls:
-                    continue
-
-                if not self._is_in_local_search(
-                    previous_bb,
-                    current_bb,
-                ):
-                    continue
+        track_ids = [
+            track_id
+            for track_id, _ in active_tracks
+        ]
 
 
-                current_error = (
-                    self._calculate_frame_matching_error(
-                        previous_bb,
-                        current_bb,
-                    )
-                )
+        cost_matrix = np.full(
+            (
+                len(active_tracks),
+                len(current_bbs),
+            ),
+            np.inf,
+            dtype=np.float64,
+        )
 
-                if current_error < best_error:
+        for i, (
+            track_id,
+            track,
+        ) in enumerate(active_tracks):
 
-                    best_error = current_error
-                    best_track_id = track_id
+            previous_bb = track["bbox"]
 
-
-            if (
-                best_track_id is not None
-                and best_error < self.threshold
+            for j, current_bb in enumerate(
+                current_bbs
             ):
 
-                track = self.tracks[
-                    best_track_id
-                ]
-
-                previous_bb = track["bbox"]
-
-                track["bbox"] = current_bb
-
-                track["misses"] = 0
-
-                used_tracks.add(
-                    best_track_id
-                )
-
-                matches.append(
-                    (
-                        best_track_id,
+                cost_matrix[i, j] = (
+                    self._calculate_cost(
                         previous_bb,
                         current_bb,
                     )
                 )
 
+        hungarian_matrix = np.where(
+            np.isfinite(cost_matrix),
+            cost_matrix,
+            1e9,
+        )
 
-            else:
+        row_indices, col_indices = (
+            linear_sum_assignment(
+                hungarian_matrix
+            )
+        )
 
-                track_id = self._create_track(
-                    current_bb
+        matched_tracks = set()
+        matched_detections = set()
+
+
+        for row, col in zip(
+            row_indices,
+            col_indices,
+        ):
+
+            cost = cost_matrix[
+                row,
+                col,
+            ]
+
+            if not np.isfinite(cost):
+                continue
+
+            if cost >= self.threshold:
+                continue
+
+            track_id = track_ids[row]
+
+            current_bb = current_bbs[col]
+
+            track = self.tracks[
+                track_id
+            ]
+
+            previous_bb = track["bbox"]
+
+            track["bbox"] = current_bb
+
+            track["misses"] = 0
+
+            track["hits"] += 1
+
+            track["age"] += 1
+
+            matched_tracks.add(
+                track_id
+            )
+
+            matched_detections.add(
+                col
+            )
+
+            results.append(
+                (
+                    track_id,
+                    previous_bb,
+                    current_bb,
                 )
-
-                used_tracks.add(
-                    track_id
-                )
-
-                matches.append(
-                    (
-                        track_id,
-                        None,
-                        current_bb,
-                    )
-                )
+            )
 
 
         for track_id, track in active_tracks:
 
-            if track_id in used_tracks:
+            if track_id in matched_tracks:
                 continue
 
             track["misses"] += 1
-            matches.append(
+            track["age"] += 1
+
+            results.append(
                 (
                     track_id,
                     track["bbox"],
@@ -638,6 +810,26 @@ class FrameMatcher(BBMatcher):
                 )
             )
 
+
+        for detection_index, current_bb in enumerate(
+            current_bbs
+        ):
+
+            if detection_index in matched_detections:
+                continue
+
+            track_id = self._create_track(
+                current_bb
+            )
+
+            results.append(
+                (
+                    track_id,
+                    None,
+                    current_bb,
+                )
+            )
+
         self._remove_old_tracks()
 
-        return matches
+        return results

@@ -470,7 +470,7 @@ class ObjectCentricStereo:
         framel, boxes_l = (
             self.inference.pipeline(
                 frameL_path,
-                conf=0.2,
+                conf=0.3,
                 iou=0.4,
             )
         )
@@ -478,7 +478,7 @@ class ObjectCentricStereo:
         framer, boxes_r = (
             self.inference.pipeline(
                 frameR_path,
-                conf=0.2,
+                conf=0.3,
                 iou=0.4,
             )
         )
