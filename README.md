@@ -741,7 +741,7 @@ BEV rendering is a planned stage and is not yet part of the current core impleme
 | Median depth estimation             | Implemented                       |
 | Temporal BB tracker                 | Implemented as separate component |
 | Persistent `track_id`               | Implemented in `FrameMatcher`     |
-| Kalman filtering                    | Planned                           |
+| Kalman filtering                    | Implemented                           |
 | Full calibrated convergent geometry | Planned / in development          |
 | Epipolar BB search                  | Planned                           |
 | BEV visualization                   | Planned                           |
@@ -751,6 +751,12 @@ BEV rendering is a planned stage and is not yet part of the current core impleme
 # Repository
 
 [Poor_ADAS on GitHub](https://github.com/PaprykVegee/Poor_ADAS?utm_source=chatgpt.com)
+
+# Example how it's work
+
+<p align="center">
+  <img src="readme_img/demo_stereo.gif" alt="Object Centric Stereo Demo">
+</p>
 
 ## License
 
